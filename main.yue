@@ -1,0 +1,218 @@
+lg = love.graphics
+math.clamp = (n, low, high) -> math.min math.max(n, low), high
+math.sign = (n) -> n < 0 and -1 or n > 0 and 1 or n
+lg.setLineStyle 'smooth'
+
+filepath = nil
+image = nil
+width = 0
+height = 0
+
+whiteboard = nil
+
+left = 0
+right = 0
+top = 0
+bottom = 0
+
+crop = 
+	min: x: 0, y: 0, 
+	max: x: 1920, y: 1080
+
+x, y, w, h = 0, 0, 1920, 1080
+
+omx, omy = 0, 0
+
+brushSize = 8
+brushAlpha = 0
+brushTarget = 0
+
+hsvImage = nil
+hsvData = nil
+hsvPadding = 16
+hsvSize = {w: 128, h: 128}
+hsvPos = {x: hsvPadding, y: hsvPadding}
+IsInColorPicker = (x, y) -> x > hsvPos.x and x < hsvPos.x + hsvSize.w and y > hsvPos.y and y < hsvPos.y + hsvSize.h
+
+shader = nil
+r,g,b = 1, 1, 1
+
+t = 0
+wheelWidth = 0.2
+isColored = 1
+pickingColor = false
+	
+love.load = (args) ->
+	filepath = args[1]
+	file = io.open filepath, 'rb'
+	data = file\read('*a')
+	file\close!
+	
+	image = love.filesystem.newFileData data, 'image.png'
+		 |> love.image.newImageData
+		 |> lg.newImage
+
+	width = image\getWidth!
+	height = image\getHeight!
+
+	left = 1920 / 2 - width / 2
+	right = 1920 / 2 + width / 2
+	top = 1080 / 2 - height / 2
+	bottom = 1080 / 2 + height / 2
+
+	whiteboard = lg.newCanvas 1920, 1080, { msaa: 16}
+
+	shader = lg.newShader [[
+		uniform float tween;
+		uniform float width;
+		uniform float isColored;
+		#define PI 3.14159265358979323844
+		vec3 hsv(float h,float s,float v) { return mix(vec3(1.),clamp((abs(fract(h+vec3(3.,2.,1.)/3.)*6.-3.)-1.),0.,1.),s)*v; }
+		vec4 effect( vec4 color, Image tex, vec2 texture_coords, vec2 screen_coords )
+		{
+			vec2 p = texture_coords - vec2(0.5);
+			float radius = length(p);
+			float angle = atan(p.y, p.x);
+			float h = angle * 0.5 / PI + 0.5;
+			float step = 0.000001;
+			float start = 0.5 - width;
+			float end = start + width * tween;
+			float alpha =  smoothstep(start - step, start, radius) * smoothstep(end + step, end, radius);
+			vec4 a = vec4(vec3(h), alpha);
+			vec4 c = vec4(hsv(h, 1., 1.), alpha);
+		    return mix(a, c, isColored);
+		}
+	]]
+
+	hsvImage = lg.newCanvas hsvSize.w, hsvSize.h
+	hsvImage\renderTo () ->
+		shader\send 'tween', 1
+		shader\send 'width', wheelWidth
+		shader\send 'isColored', 1
+		
+		lg.setShader shader
+		lg.draw image, 0, 0, 0, hsvSize.w / width, hsvSize.h / height
+		lg.setShader!
+
+	hsvData = hsvImage\newImageData!
+	
+love.update = (dt) ->
+	brushAlpha = math.clamp(brushAlpha + math.sign(brushTarget - brushAlpha) * dt / 2, 0, 1)
+	brushTarget = 0 if brushAlpha == 1
+	mx, my = love.mouse.getPosition!
+	if not pickingColor
+		if love.mouse.isDown(1)
+			lg.setLineWidth brushSize
+			lg.setColor r, g, b
+			whiteboard\renderTo () -> lg.line mx, my, omx, omy
+			whiteboard\renderTo () -> lg.circle 'fill', mx, my, brushSize / 2
+			lg.setColor 1, 1, 1
+
+		if love.mouse.isDown(2)
+			with crop
+				.max.x, .max.y = mx, my
+				.max.x, .max.y = math.clamp(.max.x, left, right), math.clamp(.max.y, top, bottom)
+
+				x = math.min .min.x, .max.x
+				y = math.min .min.y, .max.y
+				w = math.abs .max.x - .min.x
+				h = math.abs .max.y - .min.y
+
+		t = math.max 0, t - dt * 10
+	else
+		t = math.min 1, t + dt * 10
+		px, py = mx - hsvPos.x - hsvSize.w / 2, my - hsvPos.y - hsvSize.h / 2
+		angle = math.atan2 py, px
+		ix = hsvSize.w/2 + math.cos(angle) * hsvSize.w/2 * 0.9
+		iy = hsvSize.h/2 + math.sin(angle) * hsvSize.h/2 * 0.9
+		if isColored == 1
+			r, g, b = hsvData\getPixel ix, iy
+		else
+			c = angle * 0.5 / math.pi + 0.5
+			r, g, b = c, c, c
+
+	omx, omy = mx, my
+
+DrawColorWheel = ->
+	lg.setShader shader
+	shader\send 'tween', t
+	lg.draw image, hsvPos.x, hsvPos.y, 0, hsvSize.w / width, hsvSize.h / height
+	lg.setShader!	
+
+love.draw = ->
+	with crop
+		lg.setColor 0.5, 0.5, 0.5
+		lg.draw image, left, top
+		lg.draw whiteboard
+		lg.setScissor x, y, w, h
+
+		lg.setColor 1, 1, 1
+		lg.draw image, left, top
+		lg.draw whiteboard
+		lg.setScissor!
+
+		lg.setLineWidth 1
+		lg.rectangle 'line', x - 1, y - 1, w + 2, h + 2
+
+	lg.setColor r, g, b
+	lg.circle 'fill', hsvPos.x + hsvSize.w / 2, hsvPos.y + hsvSize.h / 2, hsvSize.w / 2 - hsvSize.w * wheelWidth
+	lg.setColor 1, 1, 1
+	DrawColorWheel!
+	lg.setColor 0, 0, 0
+	lg.setLineWidth 3
+	lg.circle 'line', hsvPos.x + hsvSize.w / 2, hsvPos.y + hsvSize.h / 2, hsvSize.w / 2 - hsvSize.w * wheelWidth * (1 - t)
+	lg.setLineWidth 2
+	col = (r < 0.5 and 1 or 0) * (1 - isColored)
+	lg.setColor col,col,col, 1 - math.pow(brushAlpha - 1, 4)
+	lg.circle 'line', hsvPos.x + hsvSize.w / 2, hsvPos.y + hsvSize.h / 2, brushSize / 2
+	lg.setColor 1, 1, 1
+
+SaveImage = ->
+	canvas = lg.newCanvas w, h
+	canvas\renderTo () -> 
+		lg.draw image, 1920 / 2 - width / 2 - x, 1080 / 2 - height / 2 - y
+		lg.draw whiteboard, -x, -y
+
+	imagedata = canvas\newImageData!
+	filedata = imagedata\encode 'png', 'image.png'
+	filepath = filepath\sub(1, #filepath - 4) .. love.math.random(374829) .. filepath\sub(#filepath - 3)
+	file = io.open filepath, 'wb'
+	file\write filedata\getString!
+	file\close!
+	
+love.mousepressed = (x, y, button) ->
+	pickingColor = IsInColorPicker x, y
+	if pickingColor
+		isColored = 1 - (button - 1)
+		shader\send 'isColored', isColored
+		return
+		
+	crop.min = {x: math.clamp(x, left, right), y: math.clamp(y, top, bottom)} if button == 2
+
+	if button == 1
+		omx, omy = x, y 
+		whiteboard\renderTo () ->
+			lg.setColor r, g, b 
+			lg.circle 'fill', x, y, brushSize / 2
+
+love.mousereleased = (x, y, button) ->
+	if button == 2 and not pickingColor
+		with crop
+			.min.x, .max.x = .max.x, .min.x if .min.x > .max.x
+			.min.y, .max.y = .max.y, .min.y if .min.y > .max.y
+
+	pickingColor = false
+
+love.wheelmoved = (dx, dy) ->
+	if IsInColorPicker love.mouse.getPosition!
+		brushSize = math.clamp brushSize + dy, 4, (hsvSize.w / 2 - hsvSize.w * wheelWidth) * 2
+		brushTarget = 1
+		
+
+keyEvents = 
+	escape: love.event.quit,
+	return: SaveImage,
+	c: () -> whiteboard\renderTo () -> lg.clear 0, 0, 0, 0
+
+love.keypressed = (key) -> 
+	keyEvents[key]?!
